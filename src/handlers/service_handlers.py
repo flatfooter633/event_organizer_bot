@@ -21,7 +21,7 @@ from aiogram_calendar.dialog_calendar import (
 
 from src.config.logger_config import logger
 from src.database.database import get_db
-from src.database.models import User, Event, Registration, Answer, Question, SystemSetting
+from src.database.models import User, Event, Registration, Answer, Question, SystemSetting, BroadcastQueue
 from src.database.models import (
     get_cached_event_by_id,
     get_cached_active_events,
@@ -237,10 +237,11 @@ async def begin_edit_setting(query: types.CallbackQuery, state: FSMContext):
     if setting_key == "VIDEO_FILE_ID" and setting:
 
         # Отправляем видео, если оно есть
+        await query.message.delete()
         await query.message.answer_video(
             video=setting,
-            caption=f"⚙️ Текущее приветственное видео\n\n"
-                    f"🖊 Загрузите новое видео или нажмите /cancel для отмены:"
+            caption="⚙️ Текущее приветственное видео\n\n"
+                    "🖊 Загрузите новое видео или нажмите /cancel для отмены:"
         )
         await state.set_state(AdminStates.edit_video_setting)
     else:
@@ -257,7 +258,8 @@ async def begin_edit_setting(query: types.CallbackQuery, state: FSMContext):
 async def save_video_setting(message: Message, state: FSMContext):
     if message.text == "/cancel":
         await state.clear()
-        await message.answer("Редактирование отменено.")
+        await message.delete()
+        await message.answer("⚠️ Редактирование отменено.")
         return
 
     if not message.video:
@@ -283,7 +285,8 @@ async def save_video_setting(message: Message, state: FSMContext):
 async def save_setting(message: Message, state: FSMContext):
     if message.text == "/cancel":
         await state.clear()
-        await message.answer("Редактирование отменено.")
+        await message.delete()
+        await message.answer("⚠️ Редактирование отменено.")
         return
 
     data = await state.get_data()
@@ -986,14 +989,6 @@ async def process_broadcast_message(message: Message, state: FSMContext):
         msg_data["video_note"] = message.video_note.file_id
         msg_data["caption"] = ""  # кружочки не поддерживают подписи
         msg_data["type"] = "video_note"
-    elif message.poll:
-        msg_data["poll"] = {
-            "question": message.poll.question,
-            "options": [option.text for option in message.poll.options],
-            "is_anonymous": message.poll.is_anonymous,
-            "allows_multiple_answers": message.poll.allows_multiple_answers,
-        }
-        msg_data["type"] = "poll"
     elif message.video:
         msg_data["video"] = message.video.file_id
         msg_data["caption"] = message.html_text or ""
@@ -1016,7 +1011,7 @@ async def process_broadcast_message(message: Message, state: FSMContext):
     await state.set_state(BroadcastMessage.confirmation)
 
 
-# Обработчик подтверждения
+
 @router.callback_query(BroadcastMessage.confirmation)
 async def confirm_broadcast(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
     if callback.data != "broadcast_confirm":
@@ -1025,76 +1020,55 @@ async def confirm_broadcast(callback: types.CallbackQuery, state: FSMContext, bo
         logger.info(f"Рассылка отменена админом {callback.from_user.id}")
         await state.clear()
         return
-    await callback.answer("✅ Подтверждено, рассылка запущена...")
+
+    await callback.answer("✅ Подтверждено, сообщение добавлено в очередь рассылки...")
     data = await state.get_data()
     msg_data = data["msg_data"]
-    logger.info(
-        f"Админ {callback.from_user.id} начал рассылку типа '{msg_data['type']}'"
-    )
+
+    logger.info(f"Админ {callback.from_user.id} добавил в очередь рассылку типа '{msg_data['type']}'")
 
     async with get_db() as session:
-        users = await User.get_all_users(session)
-
-    success, errors = 0, 0
-
-    for user_id in users:
-        try:
-            if msg_data["type"] == "text":
-                await bot.send_message(user_id, msg_data["text"], parse_mode="HTML")
-            elif msg_data["type"] == "photo":
-                await bot.send_photo(
-                    user_id,
-                    msg_data["photo"],
-                    caption=msg_data["caption"],
-                    parse_mode="HTML",
-                )
-            elif msg_data["type"] == "poll":
-                await bot.send_poll(
-                    user_id,
-                    question=msg_data["poll"]["question"],
-                    options=msg_data["poll"]["options"],
-                    is_anonymous=msg_data["poll"]["is_anonymous"],
-                    allows_multiple_answers=msg_data["poll"]["allows_multiple_answers"],
-                )
-            elif msg_data["type"] == "voice":
-                await bot.send_voice(
-                    user_id,
-                    msg_data["voice"],
-                    caption=msg_data["caption"],
-                    parse_mode="HTML",
-                )
-            elif msg_data["type"] == "video_note":
-                await bot.send_video_note(user_id, msg_data["video_note"])
-            elif msg_data["type"] == "video":
-                await bot.send_video(
-                    user_id,
-                    msg_data["video"],
-                    caption=msg_data["caption"],
-                    parse_mode="HTML",
-                )
-
-            success += 1
-
-        except (TelegramBadRequest, TelegramRetryAfter, TelegramNetworkError) as e:
-            errors += 1
-            logger.error(f"Ошибка отправки рассылки пользователю {user_id}: {e}")
-
-        except Exception as e:
-            errors += 1
-            logger.exception(
-                f"Неожиданная ошибка отправки рассылки пользователю {user_id}: {e}"
+        # Подготовка данных для сохранения в БД
+        if msg_data["type"] == "text":
+            await BroadcastQueue.add_to_queue(
+                session,
+                text=msg_data["text"],
+                media_type="text"
+            )
+        elif msg_data["type"] == "photo":
+            await BroadcastQueue.add_to_queue(
+                session,
+                text=msg_data["caption"],
+                media_id=msg_data["photo"],
+                media_type="photo"
+            )
+        elif msg_data["type"] == "voice":
+            await BroadcastQueue.add_to_queue(
+                session,
+                text=msg_data["caption"],
+                media_id=msg_data["voice"],
+                media_type="voice"
+            )
+        elif msg_data["type"] == "video_note":
+            await BroadcastQueue.add_to_queue(
+                session,
+                media_id=msg_data["video_note"],
+                media_type="video_note"
+            )
+        elif msg_data["type"] == "video":
+            await BroadcastQueue.add_to_queue(
+                session,
+                text=msg_data["caption"],
+                media_id=msg_data["video"],
+                media_type="video"
             )
 
     await callback.message.answer(
-        f"Рассылка завершена:\n✅ Успешно: {success}\n❌ Ошибок: {errors}"
-    )
-    logger.info(
-        f"Рассылка завершена админом {callback.from_user.id}: успешно - {success}, ошибки - {errors}"
+        "Сообщение успешно добавлено в очередь рассылки. "
+        "Оно будет отправлено пользователям в ближайшее время."
     )
 
     await state.clear()
-
-
 # endregion
 # ---------------------------------------------------------
 

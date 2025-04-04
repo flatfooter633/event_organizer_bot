@@ -61,6 +61,48 @@ pwd_context = CryptContext(
 )
 
 
+class BroadcastQueue(Base):
+    __tablename__ = "broadcast_queue"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    text: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    media_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    media_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    status: Mapped[bool] = mapped_column(Boolean, default=False)
+    sent_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+
+    @classmethod
+    async def add_to_queue(cls, session, text=None, media_id=None, media_type=None):
+        """Добавляет сообщение в очередь рассылки"""
+        new_message = cls(
+            text=text,
+            media_id=media_id,
+            media_type=media_type,
+            status=False
+        )
+        session.add(new_message)
+        await session.commit()
+        return new_message
+
+    @classmethod
+    async def get_pending_messages(cls, session, limit=50):
+        """Получает сообщения, ожидающие отправки"""
+        query = select(cls).where(cls.status == False).order_by(cls.id).limit(limit)
+        result = await session.execute(query)
+        return result.scalars().all()
+
+    @classmethod
+    async def mark_as_sent(cls, session, message_id):
+        """Отмечает сообщение как отправленное"""
+        message = await session.get(cls, message_id)
+        if message:
+            message.status = True
+            message.sent_at = datetime.now()
+            await session.commit()
+            return True
+        return False
+
+
 class SystemSetting(Base):
     __tablename__ = "system_settings"
 

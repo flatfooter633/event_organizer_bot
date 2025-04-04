@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config.logger_config import logger
 from src.database.database import get_db
-from src.database.models import User, Event, Registration
+from src.database.models import User, Event, Registration, BroadcastQueue
 from src.keyboards.keyboards import get_registration_kb
 
 MAX_CONCURRENT_TASKS = 20  # ограничение на число одновременных отправок
@@ -29,7 +29,7 @@ async def notify_admins(bot: Bot, event: Event):
 
 
 async def send_reminder(
-    bot: Bot, session: AsyncSession, event: Event, text: str, delta_days: int
+        bot: Bot, session: AsyncSession, event: Event, text: str, delta_days: int
 ):
     try:
         registered_users = set(
@@ -73,12 +73,12 @@ async def safe_send_telegram(bot, chat_id, text, keyboard=None):
 
 
 async def send_message_to_user(
-    bot: Bot,
-    user_id: int,
-    message_text: str,
-    keyboard,
-    event_name: str,
-    delta_days: int,
+        bot: Bot,
+        user_id: int,
+        message_text: str,
+        keyboard,
+        event_name: str,
+        delta_days: int,
 ):
     await safe_send_telegram(bot, user_id, message_text, keyboard)
 
@@ -143,7 +143,7 @@ async def send_event_reminders(bot, session, event, now):
 
     for interval, reminder_field, _ in REMINDER_CONFIGS:
         if interval >= diff > interval - timedelta(
-            hours=2
+                hours=2
         ) and await should_send_reminder(event, reminder_field):
             formatted_diff = format_time_difference(diff)
             message = (
@@ -154,8 +154,6 @@ async def send_event_reminders(bot, session, event, now):
             )
             await send_reminder(bot, session, event, message, interval.days)
             await mark_reminder_sent(session, event, reminder_field)
-
-
 
 
 async def check_events(bot: Bot):
@@ -173,6 +171,84 @@ async def check_events(bot: Bot):
                 logger.info(f"Событие '{event.name}' отмечено завершенным.")
 
 
+async def get_pending_data_for_single_broadcast():
+    """Получает самое раннее ожидающее сообщения для единичной рассылки"""
+    async with get_db() as session:
+        # Берём только самое раннее сообщение (одно сообщение за одну рассылку)
+        pending_message = await BroadcastQueue.get_pending_messages(session, limit=1)
+        if pending_message:
+            pending_message = pending_message[0]
+        else:
+            pending_message = None
+
+        users = await User.get_all_user_ids(session)
+
+    return users, pending_message
+
+
+
+async def process_single_broadcast_message(bot: Bot):
+    """Отправляет одно сообщение всем пользователям"""
+    logger.info(f"Запуск единичной рассылки сообщений")
+    try:
+        users, message = await get_pending_data_for_single_broadcast()
+
+        if not message:
+            logger.info("Очередь рассылки пуста, отправлять ничего не нужно.")
+            return
+
+        async with get_db() as session:
+            success, errors = 0, 0
+            semaphore = Semaphore(MAX_CONCURRENT_TASKS)
+
+            async def send_to_user(user_id):
+                nonlocal success, errors
+                async with semaphore:
+                    try:
+                        if message.media_type == "photo":
+                            await bot.send_photo(
+                                user_id,
+                                message.media_id,
+                                caption=message.text or "",
+                                parse_mode="HTML"
+                            )
+                        elif message.media_type == "voice":
+                            await bot.send_voice(
+                                user_id,
+                                message.media_id,
+                                caption=message.text or "",
+                                parse_mode="HTML"
+                            )
+                        elif message.media_type == "video_note":
+                            await bot.send_video_note(user_id, message.media_id)
+                        elif message.media_type == "video":
+                            await bot.send_video(
+                                user_id,
+                                message.media_id,
+                                caption=message.text or "",
+                                parse_mode="HTML"
+                            )
+                        else:
+                            await bot.send_message(user_id, message.text, parse_mode="HTML")
+
+                        success += 1
+                    except (TelegramAPIError, Exception) as exception:
+                        errors += 1
+                        logger.error(f"Ошибка отправки сообщения пользователю {user_id}: {exception}")
+
+            tasks = [send_to_user(user_id) for user_id in users]
+            await gather(*tasks)
+
+            # Отмечаем сообщение как отправленное
+            await BroadcastQueue.mark_as_sent(session, message.id)
+
+            logger.info(f"Рассылка сообщения ID {message.id} завершена: успешно - {success}, ошибки - {errors}")
+
+    except Exception as e:
+        logger.exception(f"Ошибка при единичной рассылке: {e}")
+
+
+
 def setup_scheduler(bot: Bot):
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
@@ -182,6 +258,27 @@ def setup_scheduler(bot: Bot):
         args=[bot],
         next_run_time=datetime.now() + timedelta(seconds=10),
     )
+    # Новое расписание для очереди рассылки
+    scheduler.add_job(
+        process_single_broadcast_message,
+        trigger='cron',
+        hour=9, minute=0,  # запуск в 9:00 ежедневно
+        args=[bot],
+    )
+    scheduler.add_job(
+        process_single_broadcast_message,
+        trigger='cron',
+        hour=10, minute=0,  # запуск в 10:00 ежедневно
+        args=[bot],
+    )
+
+    scheduler.add_job(
+        process_single_broadcast_message,
+        trigger='cron',
+        hour=19, minute=0,  # запуск в 19:00 ежедневно
+        args=[bot],
+    )
+
     scheduler.start()
     logger.info("Планировщик задач успешно настроен и запущен.")
     return scheduler

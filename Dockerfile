@@ -3,19 +3,22 @@ FROM python:3.12.7-alpine3.20
 
 LABEL maintainer="flatfooter633@gmail.com"
 ENV ADMIN="flatfooter633"
+ENV PYTHONUNBUFFERED=1
 
 # Обновим индекс доступных пакетов, обновим пакеты и установим bash
 RUN apk update && apk upgrade && apk add bash && apk add nano
 
-# Устанавливаем зависимости
-COPY requirements.txt /app/
-RUN pip install --no-cache-dir -r /app/requirements.txt
-
-# Копируем файлы приложения
-COPY . ./app
-
 # Устанавливаем рабочую директорию
 WORKDIR /app
 
+# Копируем и устанавливаем зависимости
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Копируем файлы приложения
+COPY . .
+
 # Указываем команду для запуска приложения
-CMD ["python", "./main.py"]
+CMD ["python", "src/main.py"]
+
+

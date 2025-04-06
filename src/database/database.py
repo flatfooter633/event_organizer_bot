@@ -13,7 +13,7 @@ from src.database.models import Base
 # region engine
 # ---------------------------------------------------------
 engine = create_async_engine(
-    url=settings.database.database_url_sqlite,
+    url=settings.database.database_url_asyncpg,
     echo=True,  # Логирование SQL-запросов
     poolclass=AsyncAdaptedQueuePool,
     pool_size=10,

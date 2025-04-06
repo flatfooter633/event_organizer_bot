@@ -1,31 +1,36 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.orm import DeclarativeBase
 import os
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent.parent  # На один уровень выше текущего файла
+ENV_PATH = BASE_DIR / ".env"
 
 class DatabaseSettings(BaseSettings):
-    DB_HOST: str = "localhost"
-    DB_PORT: int = 8080
-    DB_USER: str = "root"
-    DB_PASS: str = "root"
-    DB_NAME: str = "events.db"
+    DB_HOST: str = "postgres"
+    DB_PORT: int = 5432
+    POSTGRES_USER: str
+    POSTGRES_PASSWORD: str
+    POSTGRES_DB: str = "event_db"
+
 
     model_config = SettingsConfigDict(
-        env_file=".env", populate_by_name=True, extra="allow"
+        env_file=ENV_PATH, populate_by_name=True, extra="allow"
     )
 
     @property
     def database_url_asyncpg(self):
-        return f"postgresql+asyncpg://{self.DB_USER}:{self.DB_PASS}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
+        return f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.POSTGRES_DB}"
 
     @property
     def database_url_psycopg(self):
-        return f"postgresql+psycopg://{self.DB_USER}:{self.DB_PASS}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
+        return f"postgresql+psycopg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.POSTGRES_DB}"
 
     @property
     def database_url_sqlite(self):
         base_dir = os.path.abspath(
             os.path.join(os.path.dirname(__file__), '..'))  # поднимаемся на уровень выше текущего файла
-        db_path = os.path.join(base_dir, 'database', self.DB_NAME)
+        db_path = os.path.join(base_dir, 'database', self.POSTGRES_DB)
         return f"sqlite+aiosqlite:///{db_path}"
 
 
@@ -35,7 +40,9 @@ class Settings(BaseSettings):
     BOT_TOKEN: str = "DEFAULT"
     SECRET_KEY: str = "DEFAULT"
 
-    model_config = SettingsConfigDict(env_file="../.env", extra="allow")
+    model_config = SettingsConfigDict(
+        env_file=ENV_PATH, extra="allow"
+    )
 
 
 settings = Settings()

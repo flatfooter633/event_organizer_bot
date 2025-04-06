@@ -3,7 +3,8 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Union
 
-import pandas as pd
+from openpyxl import Workbook
+
 from aiogram import Bot, types, F, Router
 from aiogram.exceptions import (
     TelegramBadRequest,
@@ -688,19 +689,26 @@ async def process_export(callback: types.CallbackQuery, state: FSMContext):
                 question_text
             )  # Добавляем вопросы в порядке их появления
 
-    # DataFrame с возможными пустыми ячейками для ответов
-    df = pd.DataFrame.from_dict(data, orient="index", columns=sorted_questions)
-    df.index.name = "User ID"
+    # Создаем рабочую книгу и лист Excel
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Ответы"
+
+    # Заполняем заголовки таблицы
+    headers = ["User ID"] + sorted_questions
+    ws.append(headers)
+
+    # Заполняем строки данными
+    for user_id, answers_dict in data.items():
+        row = [user_id] + [answers_dict.get(q, "") for q in sorted_questions]
+        ws.append(row)
 
     try:
         # Создаём Excel-файл в буфере памяти
         excel_buffer = io.BytesIO()
-        with pd.ExcelWriter(excel_buffer, engine="xlsxwriter") as writer:  # type: ignore
-            df.to_excel(writer, sheet_name="Ответы")
-
+        wb.save(excel_buffer)
         excel_buffer.seek(0)
 
-        # Готовим файл к отправке
         excel_file = types.BufferedInputFile(
             excel_buffer.getvalue(),
             filename=f"анкеты_{event.event_date.strftime('%Y-%m-%d')}_{event.name}.xlsx",
@@ -713,12 +721,11 @@ async def process_export(callback: types.CallbackQuery, state: FSMContext):
         await callback.message.answer_document(excel_file, caption="📄 Анкеты (Excel)")
 
     except Exception as e:
-        logger.exception(
-            f"Ошибка во время экспорта ответов мероприятия {event_id}: {e}"
-        )
+        logger.exception(f"Ошибка во время экспорта ответов мероприятия {event_id}: {e}")
         await callback.message.answer("Произошла ошибка при экспорте ответов.")
     finally:
         await state.clear()
+
 
 
 # endregion

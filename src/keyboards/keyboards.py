@@ -57,7 +57,6 @@ edit_setting_keyboard = create_inline_kb(
     [
         ("✏️ Видео приветствия 📽", "edit_setting_VIDEO_FILE_ID"),
         ("✏️ Стартовое сообщение 📃", "edit_setting_START_MESSAGE"),
-        ("✏️ Приветственное сообщение ✉️", "edit_setting_WELCOME_MESSAGE"),
         ("✏️ Текст команд админа 🛠", "edit_setting_ADMIN_COMMANDS_TEXT"),
     ],
     adjust=1,

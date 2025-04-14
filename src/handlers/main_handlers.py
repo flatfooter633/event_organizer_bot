@@ -17,7 +17,6 @@ from src.database.models import (
 from src.keyboards.keyboards import (
     get_registration_confirmation_kb,
     active_events_kb,
-    digits_keyboard,
     events_keyboard,
     admin_keyboard,
     commands_keyboard,
@@ -44,10 +43,6 @@ async def get_start_message():
     async with get_db() as session:
         return await SystemSetting.get_setting_cached(session, "START_MESSAGE", "")
 
-
-async def get_welcome_message():
-    async with get_db() as session:
-        return await SystemSetting.get_setting_cached(session, "WELCOME_MESSAGE", "")
 
 
 def log_user_action(user_id: int, action: str, his: bool = False):
@@ -111,10 +106,6 @@ async def start(message: Message):
 
         text += await get_start_message()
         await message.answer(text, parse_mode="HTML", reply_markup=events_keyboard)
-        welcome_message = await get_welcome_message()
-        await message.answer(
-            welcome_message, parse_mode="HTML", reply_markup=digits_keyboard
-        )
 
         await async_log_user_action(
             user_id, "показано стандартное приветственное сообщение.", his=True
@@ -228,7 +219,6 @@ async def ask_question(message: Message, state: FSMContext, questions, question_
         async with get_db() as session:
             reg = Registration(user_id=user_id, event_id=event_id)
             session.add(reg)
-            # await session.commit()
 
             await async_log_user_action(
                 user_id, f"сохранена Регистрация (Event ID: {event_id})", his=True

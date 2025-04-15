@@ -161,7 +161,7 @@ async def offer_active_events(message: Message):
             )
 
             await async_log_user_action(
-                user_id[0],
+                user_id,
                 f"получил мероприятия для регистрации (всего: {len(events)}).",
                 his=False,
             )
@@ -169,7 +169,7 @@ async def offer_active_events(message: Message):
             await message.answer("В настоящее время нет активных мероприятий.")
 
             await async_log_user_action(
-                user_id[0],
+                user_id,
                 "получил сообщение об отсутствии активных мероприятий.",
                 his=False,
             )

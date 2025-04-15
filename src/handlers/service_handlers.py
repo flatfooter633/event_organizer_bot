@@ -386,7 +386,11 @@ async def check_admin_password(message: Message, state: FSMContext):
 
                 # Теперь вызываем обработчик с фейковым CallbackQuery
                 await handle_callback_command(command, fake_callback, state)
-                await message.delete()  # Удаляем сообщение с паролем
+                try:
+                    await message.delete()  # Удаляем сообщение с паролем
+                except Exception as e:
+                    logger.warning(f"Не удалось удалить сообщение: {e}")
+
                 return
 
             await state.clear()

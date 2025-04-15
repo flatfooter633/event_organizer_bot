@@ -6,7 +6,9 @@ ENV ADMIN="flatfooter633"
 ENV PYTHONUNBUFFERED=1
 
 # Обновим индекс доступных пакетов, обновим пакеты и установим bash
-RUN apk update && apk upgrade && apk add bash && apk add nano
+RUN apk update && apk upgrade && apk add bash && apk add nano && apk add --no-cache tzdata
+ENV TZ=Europe/Moscow
+
 
 # Устанавливаем рабочую директорию
 WORKDIR /app

@@ -7,7 +7,7 @@ from src.database.database import init_db, get_db
 from src.database.models import SystemSetting
 from src.handlers.main_handlers import router as main_router
 from src.handlers.service_handlers import router as service_router
-from src.middleware.middleware import AdminAuthMiddleware, AdminCallbackMiddleware
+from src.middleware.middleware import AdminCallbackMiddleware
 from src.utils.scheduler import setup_scheduler
 
 bot = Bot(token=settings.BOT_TOKEN)
@@ -42,12 +42,11 @@ async def init_system_settings():
             },
             {
                 "key": "START_MESSAGE",
-                "value": "Я — <b>Карина Богданова</b>, психолог, гештальт-терапевт и тренер.\n\n"
-                "Привет, дорогой психолог!\n\n"
+                "value": "Привет, дорогой психолог!\n\n"
                 "Мы, <b>Юля</b> и <b>Раф</b>, психологи с богатой практикой и солидным количеством клиентов, "
-                "создали пространство для психологов <b><a href=https://t.me/+qP3qS4sZnrU3MjIy>ПРОЯВОЧНАЯ</a></b>, где щедро делимся своим опытом и рассказываем о том, "
+                'создали пространство для психологов <b>ПРОЯВОЧНАЯ</b>, где щедро делимся своим опытом и рассказываем о том, '
                 "как сделать практику больше, интереснее и богаче.\n"
-                "Посмотри, какие мероприятия ждут тебя в ближайшее время и регистрируйся на них. Добро пожаловать в сообщество своих людей.",
+                "Посмотри, какие мероприятия ждут тебя в ближайшее время и регистрируйся на них. Добро пожаловать в сообщество своих людей.\n\n",
                 "description": "Стартовое сообщение бота",
             },
         ]
@@ -76,7 +75,6 @@ async def main():
     await init_db()
     await init_system_settings()
 
-    dp.message.middleware(AdminAuthMiddleware())
     dp.update.middleware.register(AdminCallbackMiddleware())
     dp.callback_query.middleware(AdminCallbackMiddleware())
 

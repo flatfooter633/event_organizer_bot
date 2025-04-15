@@ -1,6 +1,6 @@
 import io
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import Union
 
 from openpyxl import Workbook
@@ -19,7 +19,7 @@ from aiogram_calendar.dialog_calendar import (
     DialogCalendar,
     DialogCalAct,
 )
-
+from src.config.config import settings
 from src.config.logger_config import logger
 from src.database.database import get_db
 from src.database.models import User, Event, Registration, Answer, Question, SystemSetting, BroadcastQueue
@@ -38,7 +38,7 @@ from src.keyboards.keyboards import (
     get_cancel_confirmation_kb,
     create_question_keyboard,
     create_time_keyboard,
-    edit_setting_keyboard,
+    edit_setting_keyboard, get_reschedule_confirmation_kb
 )
 from src.states.states import (
     AddEvent,
@@ -51,12 +51,246 @@ from src.states.states import (
     ChangePassword,
     BroadcastMessage,
     SetWelcomeVideo,
+    RescheduleEvent,
     EditQuestions,
     AdminStates,
 )
 from src.utils.scheduler import notify_admins
 
 router = Router()
+
+MAX_QUESTIONS = settings.MAX_QUESTIONS
+# ---------------------------------------------------------
+# region RescheduleEvent(StatesGroup)
+# ---------------------------------------------------------
+@router.callback_query(F.data == "command_reschedule_event")
+async def reschedule_event(callback: types.CallbackQuery, state: FSMContext):
+    # Отвечаем на колбэк, чтобы убрать индикатор загрузки с кнопки
+    await callback.answer()
+
+    logger.info(f"Админ {callback.from_user.id} начал процесс переноса мероприятия.")
+
+    async with get_db() as session:
+        events = await get_cached_active_events(session)
+
+        if events:
+            await callback.message.answer(
+                "Выберите мероприятие, дату которого требуется перенести:",
+                reply_markup=get_events_kb(events)
+            )
+
+            await state.set_state(RescheduleEvent.choosing_event)
+
+            logger.info(
+                f"Отправлен список мероприятий админу {callback.from_user.id} для переноса."
+            )
+        else:
+            await callback.message.answer("🔴 Нет активных мероприятий.")
+
+
+@router.callback_query(RescheduleEvent.choosing_event)
+async def process_event_selection(callback: types.CallbackQuery, state: FSMContext):
+    # Извлекаем ID из строки вида 'event_3'
+    event_id_str = callback.data.split('_')[1] if '_' in callback.data else callback.data
+
+    try:
+        event_id = int(event_id_str)
+    except ValueError:
+        await callback.message.answer("Ошибка: некорректный формат ID мероприятия.")
+        return
+
+    async with get_db() as session:
+        event = await session.get(Event, event_id)
+        if not event:
+            await callback.message.answer("Мероприятие не найдено. Попробуйте снова.")
+            return
+
+        await state.update_data(event_id=event_id, event_name=event.name)
+        logger.info(f"Админ {callback.from_user.id} выбрал мероприятие '{event.name}' для переноса")
+
+        # Показываем текущую дату мероприятия и предлагаем выбрать новую
+        current_date_str = event.event_date.strftime('%d.%m.%Y %H:%M')
+        await callback.message.edit_text(
+            f"Выбрано мероприятие: {event.name}\n"
+            f"Текущая дата: {current_date_str}\n\n"
+            "Выберите новую дату:",
+            reply_markup=await DialogCalendar(locale="ru_RU", show_alerts=True).start_calendar()
+        )
+
+        await state.set_state(RescheduleEvent.choosing_date)
+
+    await callback.answer()
+
+
+
+# Обработчик выбора даты из календаря
+@router.callback_query(DialogCalendarCallback.filter(), RescheduleEvent.choosing_date)
+async def process_date_selection(
+        callback: types.CallbackQuery,
+        callback_data: DialogCalendarCallback,
+        state: FSMContext,
+):
+    calendar = DialogCalendar(locale="ru_RU", show_alerts=True)
+    selected, date_value = await calendar.process_selection(callback, callback_data)
+
+    # Если была нажата кнопка отмены
+    if callback_data.act == DialogCalAct.cancel:
+        await state.clear()
+        await callback.message.edit_text("🚫 Перенос мероприятия отменен.")
+        await callback.answer("🚫 Перенос мероприятия отменен.", show_alert=True)
+        return
+
+    if selected:
+        if date_value:
+            await state.update_data(selected_date=date_value)
+
+            await callback.message.edit_text(
+                f"Вы выбрали дату: {date_value.strftime('%d.%m.%Y')}\nТеперь выберите время:",
+                reply_markup=create_time_keyboard()
+            )
+
+            await state.set_state(RescheduleEvent.choosing_time)
+    else:
+        # Если дата не была выбрана, но это не отмена - это просто навигация по календарю
+        await callback.answer(
+            "Пожалуйста, выберите дату"
+            if callback_data.act != DialogCalAct.cancel
+            else None
+        )
+
+
+# Обработчик выбора времени
+@router.callback_query(F.data.startswith("time_"), RescheduleEvent.choosing_time)
+async def process_time_selection(callback: types.CallbackQuery, state: FSMContext):
+    time_str = callback.data.split("_")[1]
+    try:
+        selected_time = datetime.strptime(time_str, "%H:%M").time()
+    except ValueError:
+        await callback.answer("Некорректное время. Попробуйте снова.")
+        return
+
+    data = await state.get_data()
+    selected_date = data["selected_date"]
+    full_datetime = datetime.combine(selected_date, selected_time)
+    event_name = data["event_name"]
+
+    await state.update_data(new_date=full_datetime)
+
+    # Запрашиваем подтверждение перед изменением даты
+    await callback.message.edit_text(
+        f"Вы собираетесь перенести мероприятие:\n"
+        f"'{event_name}'\n\n"
+        f"на новую дату: {full_datetime.strftime('%d.%m.%Y %H:%M')}\n\n"
+        f"Подтвердите действие:",
+        reply_markup=get_reschedule_confirmation_kb()
+    )
+
+    await state.set_state(RescheduleEvent.confirmation)
+    await callback.answer()
+
+
+# Обработчик подтверждения переноса
+@router.callback_query(F.data == "confirm_reschedule", RescheduleEvent.confirmation)
+async def confirm_reschedule(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
+    await callback.answer()
+
+    data = await state.get_data()
+    event_id = data["event_id"]
+    new_date = data["new_date"]
+    now = datetime.now()
+    if new_date <= now:
+        await callback.message.edit_text("Ошибка: нельзя перенести мероприятие на прошедшую дату.")
+        await state.clear()
+        return
+
+    async with get_db() as session:
+        event = await session.get(Event, event_id)
+        if not event:
+            await callback.message.edit_text("Ошибка: мероприятие не найдено.")
+            await state.clear()
+            return
+
+        # Сохраняем старую дату для логов
+        old_date = event.event_date
+
+        if event.event_date == new_date:
+            await callback.message.edit_text("Новая дата совпадает с текущей. Перенос не требуется.")
+            await state.clear()
+            return
+
+        # Обновляем дату мероприятия
+        event.event_date = new_date
+        await session.commit()
+
+        # Очищаем кэш
+        clear_all_cache()
+
+        logger.info(
+            f"Админ {callback.from_user.id} перенес мероприятие '{event.name}' "
+            f"с {old_date.strftime('%d.%m.%Y %H:%M')} на {new_date.strftime('%d.%m.%Y %H:%M')}"
+        )
+
+        # Уведомляем зарегистрированных пользователей о переносе
+        await notify_users_about_reschedule(bot, event, old_date)
+
+    await callback.message.edit_text(
+        f"✅ Мероприятие успешно перенесено на {new_date.strftime('%d.%m.%Y %H:%M')}."
+    )
+
+    await state.clear()
+
+
+# Обработчик отмены переноса
+@router.callback_query(F.data == "cancel_reschedule", RescheduleEvent.confirmation)
+async def cancel_reschedule(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await callback.message.edit_text("🚫 Перенос мероприятия отменен.")
+    await state.clear()
+
+
+# Функция для отправки уведомлений о переносе мероприятия
+async def notify_users_about_reschedule(bot: Bot, event: Event, old_date: datetime):
+    """⚠️ Сообщаем вам, Игорь, что у нас изменения в расписании.
+
+Мероприятие 'Семинар' перенесено по техническим причинам.
+
+Старая дата: 16.05.2025 17:00
+Новая дата: 17.05.2025 13:00
+
+Ваша регистрация сохраняется. Будем рады встрече в вами."""
+    async with get_db() as session:
+        # Получаем всех зарегистрированных пользователей с дополнительной информацией
+        registrations = await Registration.get_registrations_info(session, event.id)
+
+        # Форматируем даты
+        old_date_str = old_date.strftime("%d.%m.%Y %H:%M")
+        new_date_str = event.event_date.strftime("%d.%m.%Y %H:%M")
+
+        # Отправляем уведомления всем зарегистрированным пользователям
+        for reg in registrations:
+            try:
+                # Используем имя пользователя в сообщении для большей персонализации
+                await bot.send_message(
+                    chat_id=reg.user_id,
+                    text=f"⚠️️ Сообщаем вам, {reg.first_name}, что у нас изменения в расписании.\n\n"
+                         f"Мероприятие '<b>{event.name}</b>' перенесено по техническим причинам.\n\n"
+                         f"📅 <b>Старая дата:</b> {old_date_str}\n\n"
+                         f"📆 <b>Новая дата:</b> {new_date_str}\n\n"
+                         f"Ваша регистрация сохраняется. Будем рады встрече в вами.",
+                    parse_mode="HTML"
+                )
+                logger.info(
+                    f"Отправлено уведомление о переносе мероприятия пользователю {reg.user_id} ({reg.first_name} {reg.last_name})")
+            except Exception as e:
+                logger.error(f"Ошибка при отправке уведомления пользователю {reg.user_id}: {e}")
+
+        # Логируем общую информацию
+        logger.info(f"Отправлены уведомления о переносе мероприятия '{event.name}' {len(registrations)} пользователям")
+
+
+# endregion
+# ---------------------------------------------------------
+
 
 
 async def notify_all_users(bot: Bot, event: Event):
@@ -85,10 +319,11 @@ async def notify_all_users(bot: Bot, event: Event):
 # region AdminAuth(StatesGroup)
 # ---------------------------------------------------------
 # Обработка команд из callback-запросов
-async def handle_callback_command(command, message, state):
+async def handle_callback_command(command, callback, state):
     commands_map = {
         "broadcast": broadcast,
         "add_event": add_event,
+        "reschedule_event": reschedule_event,
         "cancel_event": cancel_event,
         "edit_questions": edit_questions,
         "set_welcome_video": set_welcome_video,
@@ -98,32 +333,16 @@ async def handle_callback_command(command, message, state):
         "change_password": change_password,
         "edit_settings": edit_settings,
     }
+
     command_handler = commands_map.get(command)
     if command_handler:
-        await command_handler(message, state)
+        # Теперь передаём объект, похожий на CallbackQuery
+        await command_handler(callback, state)
     else:
-        await message.answer("🚫 Callback-команда не распознана.")
+        # Если callback - это фейковый объект, у него будет message
+        await callback.message.answer("🚫 Callback-команда не распознана.")
 
 
-# Обработка команд, набранных вручную пользователем
-async def handle_text_command(command, message, state):
-    commands_map = {
-        "/add_event": add_event,
-        "/cancel_event": cancel_event,
-        "/broadcast": broadcast,
-        "/edit_questions": edit_questions,
-        "/add_admin": add_admin,
-        "/change_password": change_password,
-        "/set_welcome_video": set_welcome_video,
-        "/export_answers": export_answers,
-        "/view_registrations": view_registrations,
-        "/edit_settings": edit_settings,
-    }
-    command_handler = commands_map.get(command)
-    if command_handler:
-        await command_handler(message, state)
-    else:
-        await message.answer("🚫 Не найдено подходящей команды.")
 
 
 @router.message(AdminAuth.password, F.text)
@@ -133,89 +352,73 @@ async def check_admin_password(message: Message, state: FSMContext):
 
         if user and user.verify_password(message.text):
             data = await state.get_data()
-            original_command = data.get("original_command")
             original_callback = data.get("original_callback")
 
-            await state.clear()
-
+            # Создаём фейковый объект CallbackQuery на основе сохранённых данных
             if original_callback and original_callback.startswith("command_"):
+                # Формируем команду из callback data
                 command = original_callback.split("command_")[1]
-                await handle_callback_command(command, message, state)
-                await message.delete()
+
+                # Создаём фейковый объект CallbackQuery
+                from aiogram.types import User as AiogramUser
+
+                class FakeCallbackQuery:
+                    def __init__(self, data_dict):
+                        self.data = original_callback
+                        self.message = message
+
+                        # Восстанавливаем объект from_user
+                        from_user_data = {
+                            "id": data_dict.get("callback_user_id"),
+                            "username": data_dict.get("callback_username"),
+                            "first_name": data_dict.get("callback_first_name"),
+                            "last_name": data_dict.get("callback_last_name"),
+                            "is_bot": False
+                        }
+                        self.from_user = AiogramUser(**{k: v for k, v in from_user_data.items() if v is not None})
+
+                    async def answer(self, text=None, show_alert=False):
+                        # Имитация метода answer
+                        pass
+
+                # Создаём фейковый объект для использования в обработчиках
+                fake_callback = FakeCallbackQuery(data)
+
+                # Теперь вызываем обработчик с фейковым CallbackQuery
+                await handle_callback_command(command, fake_callback, state)
+                await message.delete()  # Удаляем сообщение с паролем
                 return
 
-            if original_command:
-                command = original_command.split()[0]
-                await handle_text_command(command, message, state)
-                await message.delete()
-            else:
-                await message.answer(
-                    "🚫 Не удалось определить команду. Повторите попытку."
-                )
+            await state.clear()
         else:
+            await message.delete()  # Удаляем сообщение с паролем
             await message.answer("❌ Неверный пароль! Попробуйте снова:")
+
 
 
 # endregion
 # ---------------------------------------------------------
 
 
-@router.callback_query(F.data.startswith("command_"))
-async def command_callback_handler(callback: types.CallbackQuery, state: FSMContext):
-    command = callback.data.split("command_")[1]
-
-    if command == "broadcast":
-        await broadcast(callback.message, state)
-
-    elif command == "add_event":
-        await add_event(callback.message, state)
-
-    elif command == "cancel_event":
-        await cancel_event(callback.message, state)
-
-    elif command == "edit_questions":
-        await edit_questions(callback.message, state)
-
-    elif command == "set_welcome_video":
-        await set_welcome_video(callback.message, state)
-
-    elif command == "export_answers":
-        await export_answers(callback.message, state)
-
-    elif command == "view_registrations":
-        await view_registrations(callback.message, state)
-
-    elif command == "add_admin":
-        await add_admin(callback.message, state)
-
-    elif command == "change_password":
-        await change_password(callback.message, state)
-
-    elif command == "edit_settings":
-        await edit_settings(callback, state)
-
-    await callback.answer()  # убирает индикатор загрузки с кнопки
-
 
 # ---------------------------------------------------------
 # region Command("edit_settings")
 # ---------------------------------------------------------
-@router.message(Command("edit_settings"))
-async def edit_settings(
-    message_or_callback: Union[Message, types.CallbackQuery], state: FSMContext
-):
-    # Определяем, является ли входящий объект callback'ом или сообщением
-    if isinstance(message_or_callback, types.CallbackQuery):
-        first_name = message_or_callback.from_user.first_name
-        message = message_or_callback.message
-    else:
-        first_name = message_or_callback.from_user.first_name
-        message = message_or_callback
+@router.callback_query(F.data == "command_edit_settings")
+async def edit_settings(callback: types.CallbackQuery, state: FSMContext):
+    # Получаем данные из колбэка
+    first_name = callback.from_user.first_name
 
-    await message.answer(
+    # Отвечаем на колбэк (чтобы убрать часы загрузки на кнопке)
+    await callback.answer()
+
+    # Показываем клавиатуру с настройками для редактирования
+    await callback.message.delete()
+    await callback.message.answer(
         f"{first_name}, выберите настройку для редактирования:",
         reply_markup=edit_setting_keyboard,
     )
+
 
 
 @router.callback_query(F.data.startswith("edit_setting_"))
@@ -308,11 +511,20 @@ async def save_setting(message: Message, state: FSMContext):
 # ---------------------------------------------------------
 # region AddEvent(StatesGroup)
 # ---------------------------------------------------------
-@router.message(Command("add_event"))
-async def add_event(message: Message, state: FSMContext):
-    logger.info(f"Админ {message.from_user.id} начал добавление мероприятия.")
-    await message.answer("Введите название мероприятия:")
+@router.callback_query(F.data == "command_add_event")
+async def add_event(callback: types.CallbackQuery, state: FSMContext):
+    # Отвечаем на колбэк, чтобы убрать индикатор загрузки с кнопки
+    await callback.answer()
+
+    # Логируем действие
+    logger.info(f"Админ {callback.from_user.id} начал добавление мероприятия.")
+
+    # Отправляем сообщение с инструкцией
+    await callback.message.answer("Введите название мероприятия:")
+
+    # Устанавливаем состояние
     await state.set_state(AddEvent.name)
+
 
 
 @router.message(AddEvent.name)
@@ -402,29 +614,6 @@ async def process_time_selection(callback: types.CallbackQuery, state: FSMContex
     await callback.answer()
 
 
-# Обработчик ручного ввода времени (альтернатива)
-@router.message(AddEvent.choosing_time)
-async def process_manual_time_input(message: types.Message, state: FSMContext):
-    try:
-        selected_time = datetime.strptime(message.text, "%H:%M").time()
-    except ValueError:
-        await message.answer("Пожалуйста, введите время в формате ЧЧ:ММ")
-        return
-
-    data = await state.get_data()
-    selected_date = data["selected_date"]
-    full_datetime = datetime.combine(selected_date, selected_time)
-    await state.update_data(date=full_datetime)
-    await message.answer(f"Вы выбрали: {full_datetime.strftime('%Y-%m-%d %H:%M')}")
-    logger.info(
-        f"Админ {message.from_user.id} установил дату мероприятия {full_datetime.strftime('%Y-%m-%d %H:%M')}"
-    )
-
-    await message.answer(
-        f"Мероприятие '{data.get('name')}' добавлено! Теперь напишите вопрос анкеты для участников (или отправьте команду /done для завершения):"
-    )
-    await state.set_state(AddEvent.question)
-
 
 @router.message(AddEvent.question, Command("done"))
 async def finish_questions(message: Message, state: FSMContext, bot: Bot):
@@ -456,7 +645,7 @@ async def finish_questions(message: Message, state: FSMContext, bot: Bot):
     await state.clear()
 
 
-MAX_QUESTIONS = 5  # максимальное количество вопросов
+
 
 
 @router.message(AddEvent.question, F.text)
@@ -493,17 +682,27 @@ async def add_question(message: Message, state: FSMContext):
 # ---------------------------------------------------------
 # region EditQuestions(StatesGroup)
 # ---------------------------------------------------------
-@router.message(Command("edit_questions"))
-async def edit_questions(message: Message, state: FSMContext):
+@router.callback_query(F.data == "command_edit_questions")
+async def edit_questions(callback: types.CallbackQuery, state: FSMContext):
+    # Отвечаем на колбэк, чтобы убрать индикатор загрузки с кнопки
+    await callback.answer()
+
+    # Получаем список активных мероприятий из базы данных
     async with get_db() as session:
         events = await get_cached_active_events(session)
-        await message.answer(
-            "Выберите мероприятие:", reply_markup=get_events_kb(events)
+
+        # Отправляем сообщение с выбором мероприятия
+        await callback.message.answer(
+            "Выберите мероприятие:",
+            reply_markup=get_events_kb(events)
         )
+
+        # Устанавливаем состояние для FSM
         await state.set_state(EditQuestions.EVENT)
 
 
-@router.callback_query(EditQuestions.EVENT)
+
+@router.callback_query(EditQuestions.EVENT, lambda c: c.data.startswith("event_"))
 async def select_question_to_edit(callback: types.CallbackQuery, state: FSMContext):
     event_id = int(callback.data.split("_")[1])
     await callback.answer()
@@ -631,44 +830,32 @@ async def save_question_text(message: Message, state: FSMContext):
 # ---------------------------------------------------------
 # region Command("export_answers")
 # ---------------------------------------------------------
-@router.message(Command("export_answers"))
-async def export_answers(
-    message: Message, state: FSMContext
-):  # <-- добавляем state сюда
-    logger.info(f"Админ {message.from_user.id} начал экспортирование ответов.")
+@router.callback_query(F.data == "command_export_answers")
+async def export_answers(callback: types.CallbackQuery, state: FSMContext):
+    # Отвечаем на колбэк, чтобы убрать индикатор загрузки с кнопки
+    await callback.answer()
+
+    logger.info(f"Админ {callback.from_user.id} начал экспортирование ответов.")
+
     async with get_db() as session:
         events = await Event.get_active_events_with_questions_and_answers(session)
+
         if not events:
-            await message.answer("Нет активных мероприятий с заданными вопросами.")
+            await callback.message.answer("Нет активных мероприятий с заданными вопросами.")
             return
-        await state.set_state(ExportAnswers.event)  # ⚠️ устанавливаем состояние
-        await message.answer(
-            "Выберите мероприятие:", reply_markup=get_events_kb(events)
+
+        await state.set_state(ExportAnswers.event)  # устанавливаем состояние
+
+        await callback.message.answer(
+            "Выберите мероприятие:",
+            reply_markup=get_events_kb(events)
         )
+
         logger.info(
-            f"Отправлен список мероприятий админу {message.from_user.id} для экспорта ответов."
+            f"Отправлен список мероприятий админу {callback.from_user.id} для экспорта ответов."
         )
 
-
-@router.callback_query(lambda c: c.data.startswith("event_"))
-async def process_event_selection(callback: types.CallbackQuery, state: FSMContext):
-    event_id = int(callback.data.split("_")[1])
-    current_state = await state.get_state()
-
-    if current_state == ViewRegistrations.event:
-        await show_registrations(callback, state)
-    elif current_state == CancelEvent.event:
-        await select_event_to_cancel(callback, state)
-    elif current_state == SetWelcomeVideo.SELECT_EVENT:
-        await select_event_for_video(callback, state)
-    elif current_state == EditQuestions.EVENT:
-        await select_question_to_edit(callback, state)
-    elif current_state == ExportAnswers.event:
-        await process_export(callback, state)
-    else:
-        await callback.answer("Неизвестное действие")
-
-
+@router.callback_query(ExportAnswers.event, lambda c: c.data.startswith("event_"))
 async def process_export(callback: types.CallbackQuery, state: FSMContext):
     event_id = int(callback.data.split("_")[1])
 
@@ -735,26 +922,35 @@ async def process_export(callback: types.CallbackQuery, state: FSMContext):
 # ---------------------------------------------------------
 # region ViewRegistrations event
 # ---------------------------------------------------------
-@router.message(Command("view_registrations"))
-async def view_registrations(message: Message, state: FSMContext):
+@router.callback_query(F.data == "command_view_registrations")
+async def view_registrations(callback: types.CallbackQuery, state: FSMContext):
+    # Отвечаем на колбэк, чтобы убрать индикатор загрузки с кнопки
+    await callback.answer()
+
     logger.info(
-        f"Админ {message.from_user.id} запросил просмотр регистраций мероприятий."
+        f"Админ {callback.from_user.id} запросил просмотр регистраций мероприятий."
     )
+
     async with get_db() as session:
         events = await get_cached_active_events(session)
+
         if events:
-            await message.answer(
-                "Выберите мероприятие:", reply_markup=get_events_kb(events)
+            await callback.message.answer(
+                "Выберите мероприятие:",
+                reply_markup=get_events_kb(events)
             )
+
             await state.set_state(ViewRegistrations.event)
+
             logger.info(
-                f"Отправлен список мероприятий админу {message.from_user.id} для просмотра регистраций."
+                f"Отправлен список мероприятий админу {callback.from_user.id} для просмотра регистраций."
             )
         else:
-            await message.answer("Нет активных мероприятий.")
+            await callback.message.answer("Нет активных мероприятий.")
 
 
-@router.callback_query(ViewRegistrations.event)
+
+@router.callback_query(ViewRegistrations.event, lambda c: c.data.startswith("event_"))
 async def show_registrations(callback: types.CallbackQuery, state: FSMContext):
     event_id = int(callback.data.split("_")[1])
     await callback.answer(
@@ -794,11 +990,17 @@ async def show_registrations(callback: types.CallbackQuery, state: FSMContext):
 # ---------------------------------------------------------
 # region AddAdmin(StatesGroup)
 # ---------------------------------------------------------
-@router.message(Command("add_admin"))
-async def add_admin(message: Message, state: FSMContext):
-    logger.info(f"Админ {message.from_user.id} начал добавление нового администратора.")
-    await message.answer("Введите ID пользователя для назначения администратором:")
+@router.callback_query(F.data == "command_add_admin")
+async def add_admin(callback: types.CallbackQuery, state: FSMContext):
+    # Отвечаем на колбэк, чтобы убрать индикатор загрузки с кнопки
+    await callback.answer()
+
+    logger.info(f"Админ {callback.from_user.id} начал добавление нового администратора.")
+
+    await callback.message.answer("Введите ID пользователя для назначения администратором:")
+
     await state.set_state(AddAdmin.user_id)
+
 
 
 @router.message(AddAdmin.user_id)
@@ -842,10 +1044,15 @@ async def process_admin_password(message: Message, state: FSMContext):
 # ---------------------------------------------------------
 # region ChangePassword(StatesGroup)
 # ---------------------------------------------------------
-@router.message(Command("change_password"))
-async def change_password(message: Message, state: FSMContext):
-    logger.info(f"Админ {message.from_user.id} инициировал смену пароля.")
-    await message.answer("Введите текущий пароль:")
+@router.callback_query(F.data == "command_change_password")
+async def change_password(callback: types.CallbackQuery, state: FSMContext):
+    # Отвечаем на колбэк, чтобы убрать индикатор загрузки с кнопки
+    await callback.answer()
+
+    logger.info(f"Админ {callback.from_user.id} инициировал смену пароля.")
+
+    await callback.message.answer("Введите текущий пароль:")
+
     await state.set_state(ChangePassword.old_password)
 
 
@@ -877,24 +1084,34 @@ async def process_new_password(message: Message, state: FSMContext):
 # ---------------------------------------------------------
 # region CancelEvent(StatesGroup)
 # ---------------------------------------------------------
-@router.message(Command("cancel_event"))
-async def cancel_event(message: Message, state: FSMContext):
-    logger.info(f"Админ {message.from_user.id} начал процесс отмены мероприятия.")
+@router.callback_query(F.data == "command_cancel_event")
+async def cancel_event(callback: types.CallbackQuery, state: FSMContext):
+    # Отвечаем на колбэк, чтобы убрать индикатор загрузки с кнопки
+    await callback.answer()
+
+    logger.info(f"Админ {callback.from_user.id} начал процесс отмены мероприятия.")
+
     async with get_db() as session:
         events = await get_cached_active_events(session)
+
         if events:
-            await message.answer(
-                "Выберите мероприятие для отмены:", reply_markup=get_events_kb(events)
+            await callback.message.answer(
+                "Выберите мероприятие для отмены:",
+                reply_markup=get_events_kb(events)
             )
+
             await state.set_state(CancelEvent.event)
+
             logger.info(
-                f"Отправлен список мероприятий админу {message.from_user.id} для отмены."
+                f"Отправлен список мероприятий админу {callback.from_user.id} для отмены."
             )
         else:
-            await message.answer("Нет активных мероприятий.")
+            await callback.message.answer("Нет активных мероприятий.")
 
 
-@router.callback_query(CancelEvent.event)
+
+
+@router.callback_query(CancelEvent.event, lambda c: c.data.startswith("event_"))
 async def select_event_to_cancel(callback: types.CallbackQuery, state: FSMContext):
     event_id = int(callback.data.split("_")[1])
     await callback.answer(
@@ -932,7 +1149,12 @@ async def confirm_cancellation(
             success = await Event.cancel_event(session, event_id)
             # Очищаем кэш для этого мероприятия
             clear_event_from_cache(event_id)
+            """Мероприятие: Тест
 
+Дата: 23.05.2025
+
+⚠️ Обратите, пожалуйста, внимание, что это событие было отменено. Актуальную информацию об этом и других мероприятиях вы сможете получить в нашем боте. 
+На связи ⚠️"""
             if success:
                 await callback.message.edit_text("Мероприятие успешно отменено!")
                 # Отправляем уведомления зарегистрированным пользователям
@@ -940,9 +1162,9 @@ async def confirm_cancellation(
                     try:
                         await bot.send_message(
                             user_id,
-                            f"<b>Мероприятие:</b> {event.name}\n\n"
+                            f"<b>Мероприятие:</b> {event.name} ❌\n\n"
                             f"<b>Дата:</b> {event.event_date.strftime('%d.%m.%Y')}\n\n"
-                            f"⚠️ <b>Отменено администратором!</b> ⚠️\n",
+                            f"⚠️ <b>Обратите, пожалуйста, внимание, что это событие было отменено. Актуальную информацию об этом и других мероприятиях вы сможете получить в нашем боте.\nНа связи</b> ⚠️\n",
                             parse_mode="HTML",
                         )
                     except Exception as e:
@@ -966,9 +1188,12 @@ async def confirm_cancellation(
 # ---------------------------------------------------------
 # region BroadcastMessage(StatesGroup)
 # ---------------------------------------------------------
-@router.message(Command("broadcast"))
-async def broadcast(message: Message, state: FSMContext):
-    await message.answer(
+@router.callback_query(F.data == "command_broadcast")
+async def broadcast(callback: types.CallbackQuery, state: FSMContext):
+    # Отвечаем на колбэк, чтобы убрать индикатор загрузки с кнопки
+    await callback.answer()
+
+    await callback.message.answer(
         "Отправьте: "
         "\n - текст,"
         "\n - фото,"
@@ -976,7 +1201,9 @@ async def broadcast(message: Message, state: FSMContext):
         "\n - кружочек"
         "\nили видео для рассылки всем пользователям"
     )
+
     await state.set_state(BroadcastMessage.message)
+
 
 
 # Обработчик ввода сообщения
@@ -1083,20 +1310,27 @@ async def confirm_broadcast(callback: types.CallbackQuery, state: FSMContext, bo
 # ---------------------------------------------------------
 # region SetWelcomeVideo(StatesGroup)
 # ---------------------------------------------------------
-@router.message(Command("set_welcome_video"))
-async def set_welcome_video(message: Message, state: FSMContext):
+@router.callback_query(F.data == "command_set_welcome_video")
+async def set_welcome_video(callback: types.CallbackQuery, state: FSMContext):
+    # Отвечаем на колбэк, чтобы убрать индикатор загрузки с кнопки
+    await callback.answer()
+
     logger.info(
-        f"Админ {message.from_user.id} начал процесс установки приветственного видео."
+        f"Админ {callback.from_user.id} начал процесс установки приветственного видео."
     )
+
     async with get_db() as session:
         events = await get_cached_active_events(session)
-        await message.answer(
-            "Выберите мероприятие:", reply_markup=get_events_kb(events)
+
+        await callback.message.answer(
+            "Выберите мероприятие:",
+            reply_markup=get_events_kb(events)
         )
+
         await state.set_state(SetWelcomeVideo.SELECT_EVENT)
 
 
-@router.callback_query(SetWelcomeVideo.SELECT_EVENT)
+@router.callback_query(SetWelcomeVideo.SELECT_EVENT, lambda c: c.data.startswith("event_"))
 async def select_event_for_video(callback: types.CallbackQuery, state: FSMContext):
     event_id = int(callback.data.split("_")[1])
     await callback.answer(f"Выбрано мероприятие {event_id}")

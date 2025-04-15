@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     database: DatabaseSettings = DatabaseSettings()
     BOT_TOKEN: str = "DEFAULT"
     SECRET_KEY: str = "DEFAULT"
+    MAX_QUESTIONS: int = 10  # максимальное количество вопросов
 
     model_config = SettingsConfigDict(
         env_file=ENV_PATH, extra="allow"

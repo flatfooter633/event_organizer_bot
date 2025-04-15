@@ -37,6 +37,7 @@ services:
       POSTGRES_USER: "${POSTGRES_USER}"
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
       PGDATA: "${PGDATA}"
+      TZ: "Europe/Moscow"
     volumes:
       - event-db-data:/var/lib/postgresql/data
     ports:
@@ -63,6 +64,8 @@ services:
       context: .
       dockerfile: Dockerfile
     env_file: .env
+    environment:
+      - TZ=Europe/Moscow
     depends_on:
       postgres:
         condition: service_healthy

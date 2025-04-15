@@ -41,6 +41,7 @@ commands_keyboard = create_inline_kb(
     [
         ("✅ Добавить Рассылку 📢", "command_broadcast"),
         ("✅ Добавить мероприятие 📅", "command_add_event"),
+        ("📆 Перенести мероприятие 📅", "command_reschedule_event"),
         ("🚫 Отменить мероприятие 📅", "command_cancel_event"),
         ("✏️ Редактировать вопросы ❓", "command_edit_questions"),
         ("🪄 Изменить видео 🎬", "command_set_welcome_video"),
@@ -53,16 +54,15 @@ commands_keyboard = create_inline_kb(
     adjust=1,
 )
 
+
 edit_setting_keyboard = create_inline_kb(
     [
         ("✏️ Видео приветствия 📽", "edit_setting_VIDEO_FILE_ID"),
         ("✏️ Стартовое сообщение 📃", "edit_setting_START_MESSAGE"),
-        ("✏️ Текст команд админа 🛠", "edit_setting_ADMIN_COMMANDS_TEXT"),
     ],
     adjust=1,
 )
 
-digits_keyboard = create_inline_kb([(str(i), f"digit_{i}") for i in range(1, 4)])
 
 
 def create_time_keyboard(
@@ -116,11 +116,20 @@ def get_broadcast_confirmation_kb():
     )
 
 
+
 def get_registration_confirmation_kb(event_id):
     return create_inline_kb(
         [
             ("✅ Да", f"confirm_yes_{event_id}"),
             ("❌ Нет", "confirm_no"),
+        ]
+    )
+
+def get_reschedule_confirmation_kb():
+    return create_inline_kb(
+        [
+            ("✅ Подтвердить", "confirm_reschedule"),
+            ("❌ Отменить", "cancel_reschedule"),
         ]
     )
 

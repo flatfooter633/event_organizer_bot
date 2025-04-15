@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 
 from aiogram import types, F, Router
 from aiogram.filters import Command, CommandStart
@@ -32,11 +33,11 @@ async def get_video_file_id():
         return await SystemSetting.get_setting_cached(session, "VIDEO_FILE_ID", "")
 
 
-async def get_admin_commands_text():
-    async with get_db() as session:
-        return await SystemSetting.get_setting_cached(
-            session, "ADMIN_COMMANDS_TEXT", ""
-        )
+# async def get_admin_commands_text():
+#     async with get_db() as session:
+#         return await SystemSetting.get_setting_cached(
+#             session, "ADMIN_COMMANDS_TEXT", ""
+#         )
 
 
 async def get_start_message():
@@ -67,6 +68,10 @@ async def start(message: Message):
     user_name = message.from_user.first_name
     await async_log_user_action(user_id, "запустил команду /start", his=False)
 
+    # Добавляем получение текущей даты и времени
+    current_time = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+
+
     async with get_db() as session:
         # Объединение операций в одну транзакцию
         user = await User.add_user(
@@ -83,17 +88,19 @@ async def start(message: Message):
             his=False,
         )
 
-    text = f"👋 Привет, <b>{user_name}</b>!\n\n"
+    text = str()
     if is_admin:
-        text += "Ваш статус - администратор, вам доступны команды:\n\n"
-        text += await get_admin_commands_text()
-        # Клавиатура для админа
+        text += f"👋 Привет, <b>{user_name}</b>!\n\n"
+        # Добавляем информацию о текущей дате и времени
+        text += f"📅 Текущая дата и время: <b>{current_time}</b>\n\n"
+        text += "Ваш статус - администратор!\n\nНажмите на кнопку [Команды] для доступа к меню.\n\n"
         await message.answer(text, parse_mode="HTML", reply_markup=admin_keyboard)
         await async_log_user_action(
             user_id,
             "показано приветственное сообщение со списком админ-команд.",
             his=True,
         )
+
 
     else:
         # Получаем ID видео из базы вместо использования константы
@@ -106,7 +113,7 @@ async def start(message: Message):
 
         text += await get_start_message()
         await message.answer(text, parse_mode="HTML", reply_markup=events_keyboard)
-
+        await offer_active_events(message)
         await async_log_user_action(
             user_id, "показано стандартное приветственное сообщение.", his=True
         )
@@ -118,7 +125,6 @@ async def give_my_id(message: Message):
     await async_log_user_action(
         user_id, f"вызвал команду /give_my_id. Запрошен ID пользователя.", his=False
     )
-
     await message.answer(f"Ваш ID: {user_id}")
 
 
@@ -127,40 +133,24 @@ async def send_commands_inline(message: types.Message):
     await message.answer("Выберите команду:", reply_markup=commands_keyboard)
 
 
-@router.callback_query(F.data.startswith("digit_"))
-async def process_digit(callback: CallbackQuery):
-    digit = callback.data.split("_")[-1]
-    user_name = callback.from_user.first_name
-    user_id = callback.from_user.id
-    await async_log_user_action(user_id, f"нажал кнопку {digit}", his=False)
 
-    # Отвечаем пользователю благодарностью за выбор
-    await callback.answer(f"Спасибо что поделились, {user_name}!", show_alert=True)
-
-    # Теперь удаляем предыдущее сообщение с клавиатурой
-    await callback.message.delete()
-
-    # Продолжаем работу бота
-    await offer_active_events(callback.message)
-
-
-@router.message(F.text == "Мероприятия")
+@router.message(F.text.lower() == "мероприятия")
 async def handle_events_button(message: types.Message):
     await message.delete()
     await async_log_user_action(
         message.from_user.id, f"нажал кнопку: {message.text}", his=False
     )
-
     # Вызываем нужную функцию предложений мероприятий
     await offer_active_events(message)
 
 
 async def offer_active_events(message: Message):
     """Функция предложит пользователю доступные мероприятия"""
-    user_id = (message.from_user.id,)
+    user_id = message.from_user.id
     await async_log_user_action(
-        user_id[0], "запросил список доступных мероприятий.", his=False
+        user_id, "запросил список доступных мероприятий.", his=False
     )
+
     async with get_db() as session:
         events = await get_cached_active_events(session)
 
@@ -240,6 +230,7 @@ async def ask_question(message: Message, state: FSMContext, questions, question_
                 user_id, f"добавлены Ответы в БД: {len(answers)}", his=True
             )
             video_id = await Event.get_welcome_video(session, data["event_id"])
+            await message.answer("📌 Регистрация завершена!")
 
         if video_id:
             await message.answer("Посмотрите вводное видео:")
@@ -253,14 +244,19 @@ async def ask_question(message: Message, state: FSMContext, questions, question_
                 user_id, "отправлено приветственное видео после регистрации", his=True
             )
         else:
-            await message.answer("Спасибо за регистрацию!")
+            await message.answer(
+                'Благодарим тебя за регистрацию на мастерскую.\n'
+                'Ссылка на zoom-конференцию появится в группе <a href="https://t.me/+qP3qS4sZnrU3MjIy">ПРОЯВОЧНАЯ</a>.\n\n '
+                'Заходи в группу по ссылке ниже.',
+                parse_mode="HTML",
+            )
 
             await async_log_user_action(
                 user_id,
                 "отправлено уведомление о завершении регистрации (без видео)",
                 his=True,
             )
-        await message.answer("📌 Регистрация завершена!")
+
         await state.clear()
 
 

@@ -75,6 +75,11 @@ class AdminStates(StatesGroup):
     edit_setting = State()
     edit_video_setting = State()
 
+class RescheduleEvent(StatesGroup):
+    choosing_event = State()
+    choosing_date = State()
+    choosing_time = State()
+    confirmation = State()
 
 # endregion
 # ---------------------------------------------------------

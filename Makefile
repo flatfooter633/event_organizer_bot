@@ -1,17 +1,17 @@
 build:
-    sudo docker build -t event_organizer_bot_image .
+	sudo docker build -t event_organizer_bot_image .
 logs:
-    sudo docker logs event_organizer_bot_cont
+	sudo docker logs event_organizer_bot_cont
 images:
-    sudo docker images
+	sudo docker images
 containers:
-    sudo docker ps -a
+	sudo docker ps -a
 run:
 	sudo docker run -it -d --env-file .env --restart=unless-stopped --name event_organizer_bot_cont event_organizer_bot_image
 stop:
 	sudo docker stop event_organizer_bot_cont
 start:
-    sudo docker start event_organizer_bot_cont
+	sudo docker start event_organizer_bot_cont
 attach:
 	sudo docker attach event_organizer_bot_cont
 delete:

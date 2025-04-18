@@ -56,8 +56,6 @@ services:
           memory: 1G
     networks:
       - postgres
-    cap_drop:
-      - ALL
 
 
   event_bot:

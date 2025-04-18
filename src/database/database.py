@@ -14,7 +14,7 @@ from src.database.models import Base
 # ---------------------------------------------------------
 engine = create_async_engine(
     url=settings.database.database_url_asyncpg,
-    echo=True,  # Логирование SQL-запросов
+    echo=False,  # Логирование SQL-запросов
     poolclass=AsyncAdaptedQueuePool,
     pool_size=10,
     max_overflow=20,

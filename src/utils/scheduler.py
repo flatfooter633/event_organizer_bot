@@ -19,6 +19,7 @@ async def notify_admins(bot: Bot, event: Event):
         admins = await User.get_all_admins(session)
         for admin in admins:
             message_text = (
+                f"🚧 <b>ИНФОРМАЦИЯ ДЛЯ АДМИСТРАТОРОВ</b>\n\n"
                 f"🔔 <b>Событие завершено!</b>\n\n"
                 f"📌 <b>Название:</b> {event.name}\n\n"
                 f"🗓 <b>Дата:</b> {event.event_date.strftime('%d.%m.%Y %H:%M')}\n\n"
@@ -164,7 +165,7 @@ async def check_events(bot: Bot):
         for event in events:
             await send_event_reminders(bot, session, event, now)
 
-            if now > event.event_date + timedelta(hours=1):
+            if now > event.event_date + timedelta(hours=3):
                 event.status = "completed"
                 await notify_admins(bot, event)
                 await session.commit()

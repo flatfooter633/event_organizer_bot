@@ -58,9 +58,6 @@ services:
       - postgres
     cap_drop:
       - ALL
-    read_only: true
-    tmpfs:
-      - /tmp
 
 
   event_bot:

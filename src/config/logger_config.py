@@ -9,7 +9,7 @@ from loguru import logger
 # ---------------------------------------------------------
 
 # Создаем папку log, если её нет
-log_dir = "log"
+log_dir = "/tmp/log"
 os.makedirs(log_dir, exist_ok=True)
 
 # Путь к файлу логов
